@@ -1,0 +1,50 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "windows-vcpkg",
+            "displayName": "Windows (vcpkg, dev machine)",
+            "generator": "Visual Studio 18 2026",
+            "architecture": "x64",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "C:/src/vcpkg/scripts/buildsystems/vcpkg.cmake"
+            }
+        },
+        {
+            "name": "default",
+            "inherits": "windows-vcpkg",
+            "hidden": true
+        },
+        {
+            "name": "rpi-native",
+            "displayName": "Raspberry Pi 5 (native build on Pi)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-rpi",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "windows-vcpkg",
+            "configurePreset": "windows-vcpkg",
+            "configuration": "Release"
+        },
+        {
+            "name": "default",
+            "configurePreset": "default",
+            "configuration": "Release"
+        },
+        {
+            "name": "rpi-native",
+            "configurePreset": "rpi-native"
+        }
+    ]
+}

@@ -1,0 +1,5 @@
+build/
+build-rpi/
+output.jpg
+*.user
+.vs/
