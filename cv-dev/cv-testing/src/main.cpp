@@ -2,6 +2,8 @@
 #include <iostream>
 #include <string>
 
+#include "camera.hpp"
+
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -35,6 +37,7 @@ int main(int argc, char* argv[])
 {
     bool useCamera = false;
     bool forceHeadless = false;
+    int cameraDevice = 0;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -42,9 +45,13 @@ int main(int argc, char* argv[])
             useCamera = true;
         } else if (arg == "--headless") {
             forceHeadless = true;
+        } else if (arg == "--device" && i + 1 < argc) {
+            cameraDevice = std::stoi(argv[++i]);
+            useCamera = true;
         } else if (arg == "--help" || arg == "-h") {
-            std::cout << "Usage: mars-cv [--camera] [--headless]\n"
-                      << "  --camera    Capture one frame from camera index 0\n"
+            std::cout << "Usage: mars-cv [--camera] [--headless] [--device N]\n"
+                      << "  --camera    Capture one frame from the camera\n"
+                      << "  --device N  Camera device index (default: 0)\n"
                       << "  --headless  Save output.jpg instead of opening a window\n";
             return 0;
         }
@@ -54,16 +61,33 @@ int main(int argc, char* argv[])
 
     cv::Mat frame;
     if (useCamera) {
-        cv::VideoCapture cap(0);
-        if (!cap.isOpened()) {
-            std::cerr << "Failed to open camera 0. On Pi, enable the camera and check /dev/video0.\n";
+        Camera camera(cameraDevice);
+        if (!camera.tryOpen()) {
+            std::cerr << "Failed to open camera.";
+#if defined(MARS_CV_RPI)
+            std::cerr << " On Pi, run: rpicam-still -o test.jpg -n\n";
+#else
+            std::cerr << " Check camera index " << cameraDevice << ".\n";
+#endif
             return 1;
         }
 
-        cap >> frame;
-        if (frame.empty()) {
-            std::cerr << "Camera returned an empty frame.\n";
+        if (!camera.captureFrame(frame)) {
+            std::cerr << "Camera returned an empty frame";
+            if (!camera.devicePath().empty()) {
+                std::cerr << " (" << camera.devicePath() << ")";
+            } else {
+                std::cerr << " (device " << camera.deviceIndex() << ")";
+            }
+            std::cerr << ".\n";
             return 1;
+        }
+
+        if (!camera.devicePath().empty()) {
+            std::cout << "Captured from " << camera.devicePath()
+                      << " (" << frame.cols << "x" << frame.rows << ")" << std::endl;
+        } else {
+            std::cout << "Captured from camera device " << camera.deviceIndex() << std::endl;
         }
     } else {
         frame = cv::Mat(480, 640, CV_8UC3, cv::Scalar(0, 128, 255));

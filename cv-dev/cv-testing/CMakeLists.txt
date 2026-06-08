@@ -6,9 +6,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui imgcodecs videoio)
 
-add_executable(mars-cv src/main.cpp)
+add_executable(mars-cv 
+    src/main.cpp
+    src/camera.cpp
+    src/teletubby-detector.cpp
+)
+
 target_include_directories(mars-cv PRIVATE include)
 target_link_libraries(mars-cv PRIVATE ${OpenCV_LIBS})
+if(UNIX AND NOT APPLE)
+    target_link_libraries(mars-cv PRIVATE pthread)
+endif()
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
     message(STATUS "Target: ARM64 (Raspberry Pi)")
