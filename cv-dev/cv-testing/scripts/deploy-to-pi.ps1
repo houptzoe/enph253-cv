@@ -32,6 +32,7 @@ $Sources = @(
     "$ProjectRoot\CMakePresets.json",
     "$ProjectRoot\cmake",
     "$ProjectRoot\include",
+    "$ProjectRoot\models",
     "$ProjectRoot\scripts",
     "$ProjectRoot\src"
 )
@@ -47,4 +48,5 @@ Invoke-Checked "remote build" { ssh $PiHost "cd $RemoteDir && bash scripts/build
 
 Write-Host ""
 Write-Host "Deploy complete. Run on Pi:"
-Write-Host "  ssh $PiHost `"$RemoteDir/build-rpi/mars-cv --camera --headless`""
+Write-Host "  ssh $PiHost `"$RemoteDir/build-rpi/mars-cv --camera --loop --model $RemoteDir/models/teletubby-yolov8n.onnx`""
+Write-Host "  ssh $PiHost `"$RemoteDir/build-rpi/mars-cv --camera --loop --model $RemoteDir/models/teletubby-yolov8n.onnx --no-display`""

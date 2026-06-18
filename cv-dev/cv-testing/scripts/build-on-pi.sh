@@ -20,5 +20,6 @@ cmake --build build-rpi
 
 echo ""
 echo "Done. Run:"
-echo "  ./build-rpi/mars-cv              # demo image (headless saves output.jpg)"
-echo "  ./build-rpi/mars-cv --camera     # capture from /dev/video0"
+echo "  ./build-rpi/mars-cv --camera --loop --model models/teletubby-yolov8n.onnx"
+echo "  ./build-rpi/mars-cv --camera --loop --model models/teletubby-yolov8n.onnx --no-display"
+echo "  ./build-rpi/mars-cv --camera --loop --model models/teletubby-yolov8n.onnx --confidence 0.6 --debounce 3"
