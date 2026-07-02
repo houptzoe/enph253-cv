@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 1
+names: ['teletubby']
+
+roboflow:
+  workspace: zoe-houpt-s-workspace
+  project: teletubby-detection
+  version: dataset
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/zoe-houpt-s-workspace/teletubby-detection/dataset/dataset
