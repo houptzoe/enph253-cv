@@ -1,0 +1,7 @@
+# Rename to data.yaml after exporting your labeled dataset from Roboflow.
+path: .
+train: images/train
+val: images/val
+
+names:
+  0: teletubby

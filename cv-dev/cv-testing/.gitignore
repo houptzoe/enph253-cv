@@ -1,0 +1,7 @@
+build/
+build-rpi/
+output.jpg
+*.user
+.vs/
+test-images/*
+!test-images/.gitkeep

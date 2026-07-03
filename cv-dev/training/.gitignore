@@ -1,0 +1,8 @@
+dataset/raw/
+dataset/jpeg/
+dataset/images/
+dataset/labels/
+runs/
+*.pt
+__pycache__/
+.venv/
