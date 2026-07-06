@@ -1,16 +1,40 @@
 #!/usr/bin/env bash
 # Run this script ON the Raspberry Pi 5 after cloning/copying the project.
+# Usage:
+#   bash scripts/build-on-pi.sh              # configure + build only (no sudo)
+#   bash scripts/build-on-pi.sh --install-deps  # first-time setup (requires sudo)
 set -euo pipefail
+
+INSTALL_DEPS=0
+if [[ "${1:-}" == "--install-deps" ]]; then
+    INSTALL_DEPS=1
+elif [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    echo "Usage: $0 [--install-deps]"
+    echo "  --install-deps  Run apt-get to install build tools (requires sudo)"
+    exit 0
+elif [[ $# -gt 0 ]]; then
+    echo "Unknown argument: $1" >&2
+    exit 1
+fi
 
 cd "$(dirname "$0")/.."
 
-echo "==> Installing build dependencies (safe to re-run)"
-sudo apt-get update
-sudo apt-get install -y \
-    build-essential \
-    cmake \
-    ninja-build \
-    libopencv-dev
+if [[ "$INSTALL_DEPS" -eq 1 ]]; then
+    echo "==> Installing build dependencies"
+    sudo apt-get update
+    sudo apt-get install -y \
+        build-essential \
+        cmake \
+        ninja-build \
+        libopencv-dev
+else
+    for tool in cmake ninja g++; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "Missing $tool. Re-run with --install-deps on the Pi (requires sudo)." >&2
+            exit 1
+        fi
+    done
+fi
 
 echo "==> Configuring (rpi-native preset)"
 cmake --preset rpi-native
@@ -22,4 +46,5 @@ echo ""
 echo "Done. Run:"
 echo "  ./build-rpi/mars-cv --camera --loop --model models/teletubby-yolov8n.onnx"
 echo "  ./build-rpi/mars-cv --camera --loop --model models/teletubby-yolov8n.onnx --no-display"
+echo "  ./build-rpi/mars-cv --camera --loop --model models/teletubby-yolov8n.onnx --stream-port 8080"
 echo "  ./build-rpi/mars-cv --camera --loop --model models/teletubby-yolov8n.onnx --confidence 0.6 --debounce 3"

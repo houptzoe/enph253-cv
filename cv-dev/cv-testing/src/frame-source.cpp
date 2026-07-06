@@ -25,7 +25,11 @@ std::unique_ptr<FrameSource> FrameSource::fromCamera(int deviceIndex)
     source->kind_ = Kind::Camera;
     source->camera_ = std::make_unique<Camera>(deviceIndex);
     if (!source->camera_->tryOpen()) {
-        throw std::runtime_error("Failed to open camera device " + std::to_string(deviceIndex));
+        const std::string& detail = source->camera_->lastError();
+        if (!detail.empty()) {
+            throw std::runtime_error(detail);
+        }
+        throw std::runtime_error("Failed to open camera");
     }
 
     if (!source->camera_->devicePath().empty()) {

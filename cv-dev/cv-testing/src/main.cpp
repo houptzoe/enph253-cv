@@ -8,6 +8,7 @@
 
 #include "frame-source.hpp"
 #include "teletubby-detector.hpp"
+#include "mjpeg-stream.hpp"
 
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
@@ -22,6 +23,7 @@ struct Options {
     bool forceHeadless = false;
     bool noDisplay = false;
     int cameraDevice = 0;
+    int streamPort = 0;
     int debounceFrames = 3;
     float confidence = 0.5f;
     std::string imagePath;
@@ -64,7 +66,8 @@ void printUsage()
               << "  --confidence F        Detection threshold (default: 0.5)\n"
               << "  --debounce N          Consecutive detections required (default: 3)\n"
               << "  --headless            Save output.jpg instead of opening a window\n"
-              << "  --no-display          Log only, no GUI or image output\n";
+              << "  --no-display          Log only, no GUI or image output\n"
+              << "  --stream-port N       MJPEG browser stream on port N (Linux/Pi)\n";
 }
 
 std::optional<Options> parseOptions(int argc, char* argv[])
@@ -93,6 +96,12 @@ std::optional<Options> parseOptions(int argc, char* argv[])
             options.confidence = std::stof(argv[++i]);
         } else if (arg == "--debounce" && i + 1 < argc) {
             options.debounceFrames = std::stoi(argv[++i]);
+        } else if (arg == "--stream-port" && i + 1 < argc) {
+            options.streamPort = std::stoi(argv[++i]);
+#if !defined(MARS_CV_MJPEG_STREAM)
+            std::cerr << "--stream-port is only supported on Linux/Pi builds." << std::endl;
+            return std::nullopt;
+#endif
         } else if (arg == "--help" || arg == "-h") {
             printUsage();
             return std::nullopt;
@@ -140,7 +149,8 @@ float bestConfidence(const std::vector<Detection>& detections)
 }
 
 int runSearchLoop(const Options& options, FrameSource& source,
-                  TeletubbyDetector* detector, bool showWindow)
+                  TeletubbyDetector* detector, bool showWindow,
+                  MjpegStreamServer* stream)
 {
     const std::string windowName = "mars-cv";
     int consecutiveDetections = 0;
@@ -173,6 +183,10 @@ int runSearchLoop(const Options& options, FrameSource& source,
 
         if (detector != nullptr) {
             drawDetections(frame, detections);
+        }
+
+        if (stream != nullptr) {
+            stream->publish(frame);
         }
 
         if (showWindow) {
@@ -269,16 +283,43 @@ int main(int argc, char* argv[])
         std::cout << "Loaded model: " << options->modelPath << std::endl;
     }
 
-    const bool showWindow = !options->noDisplay && !options->forceHeadless && hasDisplay();
+#if defined(MARS_CV_MJPEG_STREAM)
+    std::unique_ptr<MjpegStreamServer> stream;
+    if (options->streamPort > 0) {
+        try {
+            stream = std::make_unique<MjpegStreamServer>(options->streamPort);
+            std::cout << "MJPEG stream: http://<pi-host>:" << stream->port() << "/" << std::endl;
+        } catch (const std::exception& ex) {
+            std::cerr << ex.what() << std::endl;
+            return 1;
+        }
+    }
+#else
+    if (options->streamPort > 0) {
+        std::cerr << "--stream-port is only supported on Linux/Pi builds." << std::endl;
+        return 1;
+    }
+#endif
+
+    const bool showWindow = !options->noDisplay && !options->forceHeadless && hasDisplay()
+                            && options->streamPort == 0;
     const bool headless = options->forceHeadless || !hasDisplay();
 
     if (options->loop) {
         if (showWindow) {
             std::cout << "Search loop running. Press q or Esc to exit." << std::endl;
+        } else if (options->streamPort > 0) {
+            std::cout << "Search loop running. Open the MJPEG URL in a browser." << std::endl;
         } else {
             std::cout << "Search loop running." << std::endl;
         }
-        return runSearchLoop(*options, *source, detector.get(), showWindow);
+        return runSearchLoop(*options, *source, detector.get(), showWindow,
+#if defined(MARS_CV_MJPEG_STREAM)
+                             stream.get()
+#else
+                             nullptr
+#endif
+        );
     }
 
     return runSingleFrame(*options, *source, detector.get(), headless, showWindow);

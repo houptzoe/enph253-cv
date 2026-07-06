@@ -13,6 +13,11 @@ add_executable(mars-cv
     src/teletubby-detector.cpp
 )
 
+if(UNIX)
+    target_sources(mars-cv PRIVATE src/mjpeg-stream.cpp)
+    target_compile_definitions(mars-cv PRIVATE MARS_CV_MJPEG_STREAM=1)
+endif()
+
 target_include_directories(mars-cv PRIVATE include)
 target_link_libraries(mars-cv PRIVATE ${OpenCV_LIBS})
 if(UNIX AND NOT APPLE)
