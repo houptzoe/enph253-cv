@@ -7,6 +7,10 @@
 #include <string>
 #include <vector>
 
+#if defined(__linux__) && !defined(_WIN32)
+#include <sys/types.h>
+#endif
+
 class Camera {
 public:
     explicit Camera(int deviceIndex = 0);
@@ -37,6 +41,9 @@ private:
     bool useRpicamVid_ = false;
     bool rpicamVidAttempted_ = false;
     FILE* rpicamVidPipe_ = nullptr;
+#if defined(__linux__) && !defined(_WIN32)
+    pid_t rpicamVidPid_ = -1;
+#endif
     std::vector<unsigned char> mjpegBuffer_;
     cv::VideoCapture cap_;
 };

@@ -7,10 +7,17 @@
 #include <chrono>
 #include <cstdio>
 #include <optional>
-#include <poll.h>
 #include <string>
 #include <thread>
+
+#if defined(__linux__) && !defined(_WIN32)
+#include <cerrno>
+#include <csignal>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 namespace {
 #if defined(__linux__) && !defined(_WIN32)
@@ -23,9 +30,12 @@ constexpr int kWarmupFrames = 5;
 constexpr int kMaxReadAttempts = 30;
 constexpr int kRpicamOpenTimeoutMs = 8000;
 constexpr int kMaxV4l2Devices = 16;
-constexpr int kVideoWidth = 640;
-constexpr int kVideoHeight = 480;
+// IMX708 full FOV is 16:9. 640x480 (4:3) forces a cropped mode and loses side FOV.
+// 2304x1296 is 2x2-binned full-sensor (same FOV as 4608x2592); scale output to 1280x720.
+constexpr int kVideoWidth = 1280;
+constexpr int kVideoHeight = 720;
 constexpr int kVideoFps = 30;
+constexpr char kRpicamSensorMode[] = "2304:1296";
 
 std::string devicePathForIndex(int index)
 {
@@ -85,7 +95,8 @@ bool Camera::tryOpen()
     if (rpicamVidAttempted_) {
         if (lastError_.empty()) {
             lastError_ =
-                "Camera unavailable via rpicam-vid (another process may be using the camera). "
+                "Camera " + std::to_string(deviceIndex_) +
+                " unavailable via rpicam-vid (another process may be using it). "
                 "Run: sudo fuser -v /dev/video*  then  sudo killall rpicam-vid mars-cv";
         }
         return false;
@@ -185,26 +196,95 @@ bool Camera::probeIndex(int index)
 
 void Camera::closeRpicamVid()
 {
+#if defined(__linux__) && !defined(_WIN32)
+    // Stop the writer before closing the pipe so rpicam-vid does not SIGPIPE/abort.
+    if (rpicamVidPid_ > 0) {
+        kill(rpicamVidPid_, SIGTERM);
+        int status = 0;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (std::chrono::steady_clock::now() < deadline) {
+            const pid_t waited = waitpid(rpicamVidPid_, &status, WNOHANG);
+            if (waited == rpicamVidPid_ || (waited < 0 && errno == ECHILD)) {
+                rpicamVidPid_ = -1;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (rpicamVidPid_ > 0) {
+            kill(rpicamVidPid_, SIGKILL);
+            waitpid(rpicamVidPid_, &status, 0);
+            rpicamVidPid_ = -1;
+        }
+    }
+
     if (rpicamVidPipe_ != nullptr) {
-        pclose(rpicamVidPipe_);
+        fclose(rpicamVidPipe_);
         rpicamVidPipe_ = nullptr;
     }
+#endif
     useRpicamVid_ = false;
     mjpegBuffer_.clear();
 }
 
 bool Camera::openRpicamVid()
 {
+#if defined(__linux__) && !defined(_WIN32)
     closeRpicamVid();
     rpicamVidAttempted_ = false;
 
-    const std::string cmd = "rpicam-vid -t 0 --width " + std::to_string(kVideoWidth) +
-                            " --height " + std::to_string(kVideoHeight) +
-                            " --codec mjpeg --inline -o - -n --framerate " +
-                            std::to_string(kVideoFps);
-    rpicamVidPipe_ = popen(cmd.c_str(), "r");
-    if (rpicamVidPipe_ == nullptr) {
+    int pipefd[2] = {-1, -1};
+    if (pipe(pipefd) != 0) {
         return false;
+    }
+
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return false;
+    }
+
+    if (pid == 0) {
+        // Child: rpicam-vid writes MJPEG to stdout.
+        setsid();
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[0]);
+        close(pipefd[1]);
+
+        const std::string cameraArg = std::to_string(deviceIndex_);
+        const std::string widthArg = std::to_string(kVideoWidth);
+        const std::string heightArg = std::to_string(kVideoHeight);
+        const std::string fpsArg = std::to_string(kVideoFps);
+        execlp("rpicam-vid",
+               "rpicam-vid",
+               "-t", "0",
+               "--camera", cameraArg.c_str(),
+               "--mode", kRpicamSensorMode,
+               "--width", widthArg.c_str(),
+               "--height", heightArg.c_str(),
+               "--codec", "mjpeg",
+               "--inline",
+               "-o", "-",
+               "-n",
+               "--framerate", fpsArg.c_str(),
+               static_cast<char*>(nullptr));
+        _exit(127);
+    }
+
+    close(pipefd[1]);
+    rpicamVidPid_ = pid;
+    rpicamVidPipe_ = fdopen(pipefd[0], "r");
+    if (rpicamVidPipe_ == nullptr) {
+        close(pipefd[0]);
+        kill(rpicamVidPid_, SIGTERM);
+        waitpid(rpicamVidPid_, nullptr, 0);
+        rpicamVidPid_ = -1;
+        return false;
+    }
+    // Avoid blocking forever in fread; poll() gates reads.
+    const int flags = fcntl(pipefd[0], F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
     }
     rpicamVidAttempted_ = true;
 
@@ -214,24 +294,30 @@ bool Camera::openRpicamVid()
     while (std::chrono::steady_clock::now() < deadline) {
         if (captureViaRpicamVid(test, 250) && !test.empty()) {
             useRpicamVid_ = true;
-            devicePath_ = "rpicam-vid";
+            devicePath_ = "rpicam-vid:" + std::to_string(deviceIndex_);
             return true;
         }
-        if (feof(rpicamVidPipe_) || ferror(rpicamVidPipe_)) {
+        int status = 0;
+        const pid_t waited = waitpid(rpicamVidPid_, &status, WNOHANG);
+        if (waited == rpicamVidPid_) {
             lastError_ =
-                "Camera in use by another process. "
+                "Camera " + std::to_string(deviceIndex_) +
+                " in use by another process (or invalid index). "
                 "Run: sudo fuser -v /dev/video*  then  sudo killall rpicam-vid mars-cv";
+            rpicamVidPid_ = -1;
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
     closeRpicamVid();
+#endif
     return false;
 }
 
 bool Camera::captureViaRpicamVid(cv::Mat& frame, int timeoutMs)
 {
+#if defined(__linux__) && !defined(_WIN32)
     if (rpicamVidPipe_ == nullptr) {
         return false;
     }
@@ -260,7 +346,12 @@ bool Camera::captureViaRpicamVid(cv::Mat& frame, int timeoutMs)
 
         const size_t bytesRead = fread(chunk.data(), 1, chunk.size(), rpicamVidPipe_);
         if (bytesRead == 0) {
-            return false;
+            if (feof(rpicamVidPipe_)) {
+                return false;
+            }
+            // O_NONBLOCK: poll said readable but fread may still return EAGAIN.
+            clearerr(rpicamVidPipe_);
+            continue;
         }
 
         mjpegBuffer_.insert(mjpegBuffer_.end(), chunk.begin(), chunk.begin() + bytesRead);
@@ -271,6 +362,11 @@ bool Camera::captureViaRpicamVid(cv::Mat& frame, int timeoutMs)
     }
 
     return extractMjpegFrame(mjpegBuffer_, frame);
+#else
+    (void)frame;
+    (void)timeoutMs;
+    return false;
+#endif
 }
 
 bool Camera::captureFrame(cv::Mat& frame)
