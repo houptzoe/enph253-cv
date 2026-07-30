@@ -13,12 +13,13 @@ struct Detection {
 
 class TeletubbyDetector {
 public:
-    static constexpr int kInputSize = 640;
+    static constexpr int kDefaultInputSize = 640;
 
-    bool load(const std::string& onnxPath);
+    bool load(const std::string& onnxPath, int inputSize = kDefaultInputSize);
     bool loaded() const { return loaded_; }
+    int inputSize() const { return inputSize_; }
 
-    std::vector<Detection> detect(const cv::Mat& frame, float confThreshold = 0.5f);
+    std::vector<Detection> detect(const cv::Mat& frame, float confThreshold = 0.4f);
 
 private:
     cv::Mat preprocess(const cv::Mat& frame, float& scale, int& padX, int& padY) const;
@@ -28,4 +29,5 @@ private:
 
     cv::dnn::Net net_;
     bool loaded_ = false;
+    int inputSize_ = kDefaultInputSize;
 };

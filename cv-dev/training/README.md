@@ -55,19 +55,40 @@ See `dataset/data.yaml.example` for the expected layout.
 
 ## 3. Train
 
+Default dataset folder `dataset/`:
+
 ```powershell
 python train.py --data dataset/data.yaml --epochs 100
 ```
 
-Weights are saved to `runs/detect/teletubby/weights/best.pt`.
+Or point at a named dataset folder (e.g. `320-dataset/`):
+
+```powershell
+python train.py --dataset 320-dataset --epochs 100
+```
+
+That sets:
+- `--data 320-dataset/data.yaml`
+- run name `teletubby-320` → `runs/detect/teletubby-320/weights/best.pt`
+- `--imgsz 320` automatically when the folder/name contains `320`
 
 ## 4. Export ONNX for mars-cv
+
+Default (640) model:
 
 ```powershell
 python export_onnx.py
 ```
 
-This copies the model to `../cv-testing/models/teletubby-yolov8n.onnx`.
+→ `../cv-testing/models/teletubby-yolov8n.onnx`
+
+320-tagged model:
+
+```powershell
+python export_onnx.py --tag 320
+```
+
+→ `../cv-testing/models/teletubby-yolov8n-320.onnx` (imgsz 320)
 
 ## 5. Test on PC
 
@@ -79,12 +100,14 @@ From `cv-dev/cv-testing/` after building `mars-cv`:
 .\build\bin\Release\mars-cv.exe --video clip.mp4 --loop --model models/teletubby-yolov8n.onnx
 ```
 
-Tune detection with `--confidence 0.5` and `--debounce 3`.
+For the 320 model, use `models/teletubby-yolov8n-320.onnx` and match YOLO input size in `mars-cv` (letterbox 320).
+
+Tune detection with `--confidence 0.85`, `--window 8`, `--hit-rate 0.7`, and `--warmup 20`.
 
 ## Retraining
 
 When detection is poor on real toys:
 
 1. Add more labeled photos from your actual setup.
-2. Re-run `train.py` and `export_onnx.py`.
-3. Redeploy only the updated `.onnx` file — no C++ changes needed.
+2. Re-run `train.py` (with `--dataset ...` if needed) and `export_onnx.py --tag ...`.
+3. Redeploy only the updated `.onnx` file — no C++ changes needed unless input size changed.

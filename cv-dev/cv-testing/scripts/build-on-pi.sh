@@ -43,8 +43,8 @@ echo "==> Building"
 cmake --build build-rpi
 
 echo ""
-echo "Done. Run:"
-echo "  ./build-rpi/mars-cv --camera --loop --model models/teletubby-yolov8n.onnx"
-echo "  ./build-rpi/mars-cv --camera --loop --model models/teletubby-yolov8n.onnx --no-display"
-echo "  ./build-rpi/mars-cv --camera --loop --model models/teletubby-yolov8n.onnx --stream-port 8080"
-echo "  ./build-rpi/mars-cv --camera --loop --model models/teletubby-yolov8n.onnx --confidence 0.6 --debounce 3"
+echo "Done. Run (active model: models/teletubby-yolov8n-320.onnx):"
+echo "  ./build-rpi/mars-cv --dual --model models/teletubby-yolov8n-320.onnx"
+echo "  ./build-rpi/mars-cv --camera --device 0 --loop --model models/teletubby-yolov8n-320.onnx --no-display"
+echo "  ./build-rpi/mars-cv --camera --device 1 --loop --model models/teletubby-yolov8n-320.onnx --no-display"
+echo "  ./build-rpi/mars-cv --camera --loop --model models/teletubby-yolov8n-320.onnx --stream-port 8080"

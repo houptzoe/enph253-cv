@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         default=Path("dataset"),
-        help="Destination folder (default: dataset/)",
+        help="Destination folder (default: dataset/; e.g. 320-dataset)",
     )
     return parser.parse_args()
 
@@ -89,10 +89,26 @@ def main() -> None:
     if not final_yaml.exists():
         shutil.copy2(data_yaml, final_yaml)
 
-    train_images = list((args.output / "images" / "train").glob("*"))
-    val_images = list((args.output / "images" / "val").glob("*"))
+    # Roboflow often writes ../train/images; normalize to paths relative to this folder.
+    text = final_yaml.read_text(encoding="utf-8")
+    replacements = {
+        "train: ../train/images": "train: train/images",
+        "val: ../valid/images": "val: valid/images",
+        "test: ../test/images": "test: test/images",
+        "val: ../val/images": "val: val/images",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    final_yaml.write_text(text, encoding="utf-8")
+
+    train_images = list((args.output / "train" / "images").glob("*"))
+    if not train_images:
+        train_images = list((args.output / "images" / "train").glob("*"))
+    val_images = list((args.output / "valid" / "images").glob("*"))
+    if not val_images:
+        val_images = list((args.output / "images" / "val").glob("*"))
     print(f"Ready: {len(train_images)} train images, {len(val_images)} val images")
-    print(f"Train with: python train.py --data {final_yaml}")
+    print(f"Train with: python train.py --dataset {args.output}")
 
 
 if __name__ == "__main__":

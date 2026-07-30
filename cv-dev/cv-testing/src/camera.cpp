@@ -4,6 +4,7 @@
 #include <opencv2/videoio.hpp>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <optional>
@@ -22,6 +23,9 @@
 namespace {
 #if defined(__linux__) && !defined(_WIN32)
 constexpr int kBackend = cv::CAP_V4L2;
+constexpr int kMaxTrackedRpicam = 8;
+// Fixed slots so interruptAll() can run from a signal handler without locks.
+std::atomic<pid_t> gTrackedRpicamPids[kMaxTrackedRpicam]{};
 #else
 constexpr int kBackend = cv::CAP_ANY;
 #endif
@@ -30,11 +34,12 @@ constexpr int kWarmupFrames = 5;
 constexpr int kMaxReadAttempts = 30;
 constexpr int kRpicamOpenTimeoutMs = 8000;
 constexpr int kMaxV4l2Devices = 16;
-// IMX708 full FOV is 16:9. 640x480 (4:3) forces a cropped mode and loses side FOV.
-// 2304x1296 is 2x2-binned full-sensor (same FOV as 4608x2592); scale output to 1280x720.
-constexpr int kVideoWidth = 1280;
-constexpr int kVideoHeight = 720;
-constexpr int kVideoFps = 30;
+// IMX708 full FOV is 16:9. Prefer 16:9 output (not 640x480) to avoid side crop.
+// 2304x1296 = 2x2-binned full sensor; scale to 640x360 for faster MJPEG + letterbox.
+// Cap framerate near expected inference rate so encode/decode is not wasted.
+constexpr int kVideoWidth = 640;
+constexpr int kVideoHeight = 360;
+constexpr int kVideoFps = 15;
 constexpr char kRpicamSensorMode[] = "2304:1296";
 
 std::string devicePathForIndex(int index)
@@ -83,6 +88,46 @@ Camera::~Camera()
 {
     closeRpicamVid();
 }
+
+void Camera::interruptAll()
+{
+#if defined(__linux__) && !defined(_WIN32)
+    for (auto& slot : gTrackedRpicamPids) {
+        const pid_t pid = slot.load(std::memory_order_relaxed);
+        if (pid > 0) {
+            kill(pid, SIGTERM);
+        }
+    }
+#endif
+}
+
+#if defined(__linux__) && !defined(_WIN32)
+void Camera::trackRpicamPid(pid_t pid)
+{
+    if (pid <= 0) {
+        return;
+    }
+    for (auto& slot : gTrackedRpicamPids) {
+        pid_t expected = 0;
+        if (slot.compare_exchange_strong(expected, pid, std::memory_order_relaxed)) {
+            return;
+        }
+    }
+}
+
+void Camera::untrackRpicamPid(pid_t pid)
+{
+    if (pid <= 0) {
+        return;
+    }
+    for (auto& slot : gTrackedRpicamPids) {
+        pid_t expected = pid;
+        if (slot.compare_exchange_strong(expected, 0, std::memory_order_relaxed)) {
+            return;
+        }
+    }
+}
+#endif
 
 bool Camera::tryOpen()
 {
@@ -199,20 +244,22 @@ void Camera::closeRpicamVid()
 #if defined(__linux__) && !defined(_WIN32)
     // Stop the writer before closing the pipe so rpicam-vid does not SIGPIPE/abort.
     if (rpicamVidPid_ > 0) {
-        kill(rpicamVidPid_, SIGTERM);
+        const pid_t pid = rpicamVidPid_;
+        untrackRpicamPid(pid);
+        kill(pid, SIGTERM);
         int status = 0;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
         while (std::chrono::steady_clock::now() < deadline) {
-            const pid_t waited = waitpid(rpicamVidPid_, &status, WNOHANG);
-            if (waited == rpicamVidPid_ || (waited < 0 && errno == ECHILD)) {
+            const pid_t waited = waitpid(pid, &status, WNOHANG);
+            if (waited == pid || (waited < 0 && errno == ECHILD)) {
                 rpicamVidPid_ = -1;
                 break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         if (rpicamVidPid_ > 0) {
-            kill(rpicamVidPid_, SIGKILL);
-            waitpid(rpicamVidPid_, &status, 0);
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
             rpicamVidPid_ = -1;
         }
     }
@@ -273,9 +320,11 @@ bool Camera::openRpicamVid()
 
     close(pipefd[1]);
     rpicamVidPid_ = pid;
+    trackRpicamPid(pid);
     rpicamVidPipe_ = fdopen(pipefd[0], "r");
     if (rpicamVidPipe_ == nullptr) {
         close(pipefd[0]);
+        untrackRpicamPid(pid);
         kill(rpicamVidPid_, SIGTERM);
         waitpid(rpicamVidPid_, nullptr, 0);
         rpicamVidPid_ = -1;
@@ -304,6 +353,7 @@ bool Camera::openRpicamVid()
                 "Camera " + std::to_string(deviceIndex_) +
                 " in use by another process (or invalid index). "
                 "Run: sudo fuser -v /dev/video*  then  sudo killall rpicam-vid mars-cv";
+            untrackRpicamPid(rpicamVidPid_);
             rpicamVidPid_ = -1;
             break;
         }

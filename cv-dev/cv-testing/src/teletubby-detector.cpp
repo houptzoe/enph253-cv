@@ -45,8 +45,14 @@ cv::Rect toFrameRect(float centerX, float centerY, float width, float height,
 }
 } // namespace
 
-bool TeletubbyDetector::load(const std::string& onnxPath)
+bool TeletubbyDetector::load(const std::string& onnxPath, int inputSize)
 {
+    if (inputSize < 32) {
+        std::cerr << "YOLO input size must be >= 32 (got " << inputSize << ")" << std::endl;
+        loaded_ = false;
+        return false;
+    }
+
     try {
         net_ = cv::dnn::readNetFromONNX(onnxPath);
     } catch (const cv::Exception& ex) {
@@ -57,13 +63,14 @@ bool TeletubbyDetector::load(const std::string& onnxPath)
 
     net_.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
     net_.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
+    inputSize_ = inputSize;
     loaded_ = true;
     return true;
 }
 
 cv::Mat TeletubbyDetector::preprocess(const cv::Mat& frame, float& scale, int& padX, int& padY) const
 {
-    return letterbox(frame, kInputSize, scale, padX, padY);
+    return letterbox(frame, inputSize_, scale, padX, padY);
 }
 
 std::vector<Detection> TeletubbyDetector::postprocess(const cv::Mat& output, float confThreshold,
@@ -141,7 +148,7 @@ std::vector<Detection> TeletubbyDetector::detect(const cv::Mat& frame, float con
     const cv::Mat input = preprocess(frame, scale, padX, padY);
 
     cv::Mat blob = cv::dnn::blobFromImage(input, 1.0 / 255.0,
-                                          cv::Size(kInputSize, kInputSize),
+                                          cv::Size(inputSize_, inputSize_),
                                           cv::Scalar(), true, false);
     net_.setInput(blob);
     std::vector<cv::Mat> outputs;

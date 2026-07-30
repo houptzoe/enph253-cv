@@ -22,6 +22,9 @@ public:
     bool tryOpen();
     bool captureFrame(cv::Mat& frame);
 
+    // Signal-safe: SIGTERM all tracked rpicam-vid children so capture loops unblock.
+    static void interruptAll();
+
     int deviceIndex() const { return deviceIndex_; }
     const std::string& devicePath() const { return devicePath_; }
     const std::string& lastError() const { return lastError_; }
@@ -34,6 +37,10 @@ private:
     bool openRpicamVid();
     void closeRpicamVid();
     bool captureViaRpicamVid(cv::Mat& frame, int timeoutMs = -1);
+#if defined(__linux__) && !defined(_WIN32)
+    void trackRpicamPid(pid_t pid);
+    void untrackRpicamPid(pid_t pid);
+#endif
 
     int deviceIndex_;
     std::string devicePath_;
