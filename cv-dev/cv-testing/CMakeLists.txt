@@ -11,6 +11,7 @@ add_executable(mars-cv
     src/camera.cpp
     src/frame-source.cpp
     src/teletubby-detector.cpp
+    src/esp-handshake.cpp
 )
 
 if(UNIX)
@@ -27,6 +28,26 @@ endif()
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
     message(STATUS "Target: ARM64 (Raspberry Pi)")
     target_compile_definitions(mars-cv PRIVATE MARS_CV_RPI=1)
+
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(GPIOD QUIET libgpiod)
+    endif()
+    if(GPIOD_FOUND)
+        target_include_directories(mars-cv PRIVATE ${GPIOD_INCLUDE_DIRS})
+        target_link_libraries(mars-cv PRIVATE ${GPIOD_LIBRARIES})
+        message(STATUS "libgpiod: ${GPIOD_LIBRARIES}")
+    else()
+        find_library(GPIOD_LIBRARY gpiod)
+        find_path(GPIOD_INCLUDE_DIR gpiod.h)
+        if(NOT GPIOD_LIBRARY OR NOT GPIOD_INCLUDE_DIR)
+            message(FATAL_ERROR
+                "libgpiod not found. On the Pi run: sudo apt-get install -y libgpiod-dev")
+        endif()
+        target_include_directories(mars-cv PRIVATE ${GPIOD_INCLUDE_DIR})
+        target_link_libraries(mars-cv PRIVATE ${GPIOD_LIBRARY})
+        message(STATUS "libgpiod: ${GPIOD_LIBRARY}")
+    endif()
 endif()
 
 if(WIN32)

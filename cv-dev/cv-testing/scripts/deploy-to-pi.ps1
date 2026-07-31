@@ -51,7 +51,7 @@ Invoke-Checked "scp model" { scp $ModelPath "${PiHost}:${RemoteDir}/models/$Acti
 
 Write-Host "==> Normalizing shell script line endings on Pi"
 Invoke-Checked "line-ending fix" {
-    ssh $PiHost "sed -i 's/\r$//' $RemoteDir/scripts/build-on-pi.sh"
+    ssh $PiHost "sed -i 's/\r$//' $RemoteDir/scripts/build-on-pi.sh $RemoteDir/scripts/install-pi-service.sh"
 }
 
 Write-Host "==> Building on Pi"
@@ -59,7 +59,8 @@ Invoke-Checked "remote build" { ssh $PiHost "cd $RemoteDir && bash scripts/build
 
 Write-Host ""
 Write-Host "Deploy complete. Active model: models/$ActiveModel"
-Write-Host "Run on Pi:"
+Write-Host "Run on Pi (waits for ESP START on GPIO4 by default):"
 Write-Host "  ssh $PiHost `"$RemoteDir/build-rpi/mars-cv --dual --model $RemoteDir/models/$ActiveModel`""
-Write-Host "  ssh $PiHost `"$RemoteDir/build-rpi/mars-cv --camera --device 0 --loop --model $RemoteDir/models/$ActiveModel --no-display`""
-Write-Host "  ssh $PiHost `"$RemoteDir/build-rpi/mars-cv --camera --device 1 --loop --model $RemoteDir/models/$ActiveModel --no-display`""
+Write-Host "Lab without handshake:"
+Write-Host "  ssh $PiHost `"$RemoteDir/build-rpi/mars-cv --dual --model $RemoteDir/models/$ActiveModel --no-esp-handshake`""
+Write-Host "See cv-dev/ESP32-GPIO-HANDSHAKE.md for the pin contract."

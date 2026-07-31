@@ -26,7 +26,8 @@ if [[ "$INSTALL_DEPS" -eq 1 ]]; then
         build-essential \
         cmake \
         ninja-build \
-        libopencv-dev
+        libopencv-dev \
+        libgpiod-dev
 else
     for tool in cmake ninja g++; do
         if ! command -v "$tool" >/dev/null 2>&1; then
@@ -45,6 +46,8 @@ cmake --build build-rpi
 echo ""
 echo "Done. Run (active model: models/teletubby-yolov8n-320.onnx):"
 echo "  ./build-rpi/mars-cv --dual --model models/teletubby-yolov8n-320.onnx"
+echo "  ./build-rpi/mars-cv --dual --model models/teletubby-yolov8n-320.onnx --no-esp-handshake"
 echo "  ./build-rpi/mars-cv --camera --device 0 --loop --model models/teletubby-yolov8n-320.onnx --no-display"
 echo "  ./build-rpi/mars-cv --camera --device 1 --loop --model models/teletubby-yolov8n-320.onnx --no-display"
 echo "  ./build-rpi/mars-cv --camera --loop --model models/teletubby-yolov8n-320.onnx --stream-port 8080"
+echo "See cv-dev/ESP32-GPIO-HANDSHAKE.md for START/DETECT pin contract."

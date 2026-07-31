@@ -1,0 +1,17 @@
+[Unit]
+Description=mars-cv dual teletubby detector (ESP GPIO handshake)
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=simple
+User=@RUN_USER@
+WorkingDirectory=@RUN_DIR@
+ExecStart=@RUN_DIR@/mars-cv --dual --model @RUN_DIR@/models/teletubby-yolov8n-320.onnx
+Restart=always
+RestartSec=3
+# GPIO (libgpiod) and camera (rpicam-vid / V4L2)
+SupplementaryGroups=gpio video render
+
+[Install]
+WantedBy=multi-user.target

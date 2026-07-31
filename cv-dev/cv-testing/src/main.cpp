@@ -17,6 +17,7 @@
 #endif
 
 #include "camera.hpp"
+#include "esp-handshake.hpp"
 #include "frame-source.hpp"
 #include "teletubby-detector.hpp"
 #include "mjpeg-stream.hpp"
@@ -34,8 +35,12 @@ struct Options {
     bool loop = false;
     bool forceHeadless = false;
     bool noDisplay = false;
+    bool espHandshake = false;
+    bool espHandshakeForced = false;
+    bool noEspHandshake = false;
     int cameraDevice = 0;
     int streamPort = 0;
+    int detectPulseMs = EspHandshake::kDefaultPulseMs;
     // Sliding window: fire when hits in the last N frames reach hit-rate.
     int detectWindow = 8;
     float detectHitRate = 0.7f;
@@ -46,6 +51,14 @@ struct Options {
     std::string imagePath;
     std::string videoPath;
     std::string modelPath;
+};
+
+// First camera to yield wins the DETECT pulse; then both cameras stop.
+struct DetectHandshakeState {
+    EspHandshake* handshake = nullptr;
+    int pulseMs = EspHandshake::kDefaultPulseMs;
+    std::mutex mutex;
+    bool pulsed = false;
 };
 
 std::mutex gLogMutex;
@@ -109,6 +122,9 @@ void printUsage()
               << "  --hit-rate F          Min detect fraction in window (default: 0.7)\n"
               << "  --warmup N            Skip first N frames before window counts (default: 20)\n"
               << "  --debounce N          Alias for --window (legacy)\n"
+              << "  --esp-handshake       Wait GPIO4 START; pulse GPIO3/GPIO4 on cam0/cam1 detect (Pi)\n"
+              << "  --no-esp-handshake    Skip GPIO wait; start inference immediately\n"
+              << "  --detect-pulse-ms N   DETECT pulse width (default: 100)\n"
               << "  --headless            Save output.jpg instead of opening a window\n"
               << "  --no-display          Log only, no GUI or image output\n"
               << "  --stream-port N       MJPEG browser stream on port N (Linux/Pi; single cam)\n";
@@ -150,6 +166,12 @@ std::optional<Options> parseOptions(int argc, char* argv[])
             options.detectHitRate = std::stof(argv[++i]);
         } else if (arg == "--warmup" && i + 1 < argc) {
             options.warmupFrames = std::stoi(argv[++i]);
+        } else if (arg == "--esp-handshake") {
+            options.espHandshakeForced = true;
+        } else if (arg == "--no-esp-handshake") {
+            options.noEspHandshake = true;
+        } else if (arg == "--detect-pulse-ms" && i + 1 < argc) {
+            options.detectPulseMs = std::stoi(argv[++i]);
         } else if (arg == "--stream-port" && i + 1 < argc) {
             options.streamPort = std::stoi(argv[++i]);
 #if !defined(MARS_CV_MJPEG_STREAM)
@@ -182,6 +204,14 @@ std::optional<Options> parseOptions(int argc, char* argv[])
         std::cerr << "--imgsz must be >= 32" << std::endl;
         return std::nullopt;
     }
+    if (options.detectPulseMs < 1) {
+        std::cerr << "--detect-pulse-ms must be >= 1" << std::endl;
+        return std::nullopt;
+    }
+    if (options.espHandshakeForced && options.noEspHandshake) {
+        std::cerr << "Cannot combine --esp-handshake and --no-esp-handshake" << std::endl;
+        return std::nullopt;
+    }
 
     if (options.dual) {
         if (options.modelPath.empty()) {
@@ -198,6 +228,23 @@ std::optional<Options> parseOptions(int argc, char* argv[])
         }
         options.noDisplay = true;
     }
+
+#if defined(MARS_CV_RPI)
+    if (options.noEspHandshake) {
+        options.espHandshake = false;
+    } else if (options.espHandshakeForced) {
+        options.espHandshake = true;
+    } else {
+        // Default on for competition dual search (idle until ESP START on GPIO4).
+        options.espHandshake = options.dual && !options.modelPath.empty();
+    }
+#else
+    if (options.espHandshakeForced) {
+        std::cerr << "--esp-handshake is only supported on Raspberry Pi builds." << std::endl;
+        return std::nullopt;
+    }
+    options.espHandshake = false;
+#endif
 
     return options;
 }
@@ -266,7 +313,8 @@ void logLine(const std::string& prefix, const std::string& message)
 int runSearchLoop(const Options& options, FrameSource& source,
                   TeletubbyDetector* detector, bool showWindow,
                   MjpegStreamServer* stream, const std::string& logPrefix,
-                  std::atomic<bool>* stopFlag, bool stopOnDetect)
+                  std::atomic<bool>* stopFlag, bool stopOnDetect,
+                  DetectHandshakeState* handshakeState, int cameraIndex)
 {
     const std::string windowName = logPrefix.empty() ? "mars-cv" : ("mars-cv-" + logPrefix);
     const int hitsNeeded = requiredHits(options.detectWindow, options.detectHitRate);
@@ -325,9 +373,40 @@ int runSearchLoop(const Options& options, FrameSource& source,
 
             // Sliding-window yield: hit-rate in last N frames, gaps allowed.
             if (stopOnDetect && detector != nullptr && hitsInWindow >= hitsNeeded) {
-                logLine(logPrefix,
-                        "TELETUBBY DETECTED (confidence " +
-                            std::to_string(bestConfidence(detections)).substr(0, 4) + ")");
+                const float conf = bestConfidence(detections);
+                if (handshakeState != nullptr && handshakeState->handshake != nullptr) {
+                    std::lock_guard<std::mutex> lock(handshakeState->mutex);
+                    if (!handshakeState->pulsed) {
+                        const unsigned gpio = (cameraIndex == 0)
+                                                  ? EspHandshake::kDetectCam0Gpio
+                                                  : EspHandshake::kDetectCam1Gpio;
+                        if (!handshakeState->handshake->pulseDetect(cameraIndex,
+                                                                    handshakeState->pulseMs)) {
+                            logLine(logPrefix, handshakeState->handshake->lastError());
+                            if (stopFlag != nullptr) {
+                                stopFlag->store(true);
+                            }
+                            gStopRequested.store(true);
+                            Camera::interruptAll();
+                            return 1;
+                        }
+                        handshakeState->pulsed = true;
+                        logLine(logPrefix,
+                                "TELETUBBY DETECTED (confidence " +
+                                    std::to_string(conf).substr(0, 4) + ", GPIO" +
+                                    std::to_string(gpio) + " pulsed " +
+                                    std::to_string(handshakeState->pulseMs) + " ms)");
+                    } else {
+                        logLine(logPrefix,
+                                "TELETUBBY DETECTED (confidence " +
+                                    std::to_string(conf).substr(0, 4) +
+                                    ", peer already pulsed)");
+                    }
+                } else {
+                    logLine(logPrefix,
+                            "TELETUBBY DETECTED (confidence " +
+                                std::to_string(conf).substr(0, 4) + ")");
+                }
                 if (stopFlag != nullptr) {
                     stopFlag->store(true);
                 }
@@ -363,7 +442,7 @@ int runSearchLoop(const Options& options, FrameSource& source,
 }
 
 int runCameraWorker(Options options, int deviceIndex, const std::string& logPrefix,
-                    std::atomic<bool>& stopFlag)
+                    std::atomic<bool>& stopFlag, DetectHandshakeState* handshakeState)
 {
     options.cameraDevice = deviceIndex;
     options.useCamera = true;
@@ -390,22 +469,22 @@ int runCameraWorker(Options options, int deviceIndex, const std::string& logPref
 
     logLine(logPrefix, "Opened " + source->description() + "; search loop running");
     const int rc = runSearchLoop(options, *source, &detector, false, nullptr, logPrefix,
-                                 &stopFlag, true);
+                                 &stopFlag, true, handshakeState, deviceIndex);
     logLine(logPrefix, "Stopped");
     return rc;
 }
 
-int runDualSearch(const Options& options)
+int runDualSearch(const Options& options, DetectHandshakeState* handshakeState)
 {
     std::atomic<bool> stopFlag{false};
     int result0 = 1;
     int result1 = 1;
 
     std::thread cam0([&]() {
-        result0 = runCameraWorker(options, 0, "cam0", stopFlag);
+        result0 = runCameraWorker(options, 0, "cam0", stopFlag, handshakeState);
     });
     std::thread cam1([&]() {
-        result1 = runCameraWorker(options, 1, "cam1", stopFlag);
+        result1 = runCameraWorker(options, 1, "cam1", stopFlag, handshakeState);
     });
 
     cam0.join();
@@ -481,6 +560,41 @@ int main(int argc, char* argv[])
     // OpenCV DNN thread pool is process-wide.
     cv::setNumThreads(options->dual ? 2 : 4);
 
+    std::unique_ptr<EspHandshake> handshake;
+    DetectHandshakeState handshakeState;
+    if (options->espHandshake) {
+        if (options->modelPath.empty()) {
+            std::cerr << "ESP handshake requires --model" << std::endl;
+            return 1;
+        }
+        if (!options->dual) {
+            std::cerr << "ESP handshake requires --dual (cam0+cam1)" << std::endl;
+            return 1;
+        }
+        handshake = std::make_unique<EspHandshake>();
+        if (!handshake->open()) {
+            std::cerr << handshake->lastError() << std::endl;
+            return 1;
+        }
+        handshakeState.handshake = handshake.get();
+        handshakeState.pulseMs = options->detectPulseMs;
+        std::cout << "ESP handshake idle: waiting for START on GPIO"
+                  << EspHandshake::kStartGpio
+                  << " (cam0 DETECT GPIO" << EspHandshake::kDetectCam0Gpio
+                  << ", cam1 DETECT GPIO" << EspHandshake::kDetectCam1Gpio << ")"
+                  << std::endl;
+        if (!handshake->waitForStart(&gStopRequested)) {
+            std::cerr << handshake->lastError() << std::endl;
+            return 1;
+        }
+        std::cout << "START received — arming DETECT outputs" << std::endl;
+        if (!handshake->armDetectOutputs()) {
+            std::cerr << handshake->lastError() << std::endl;
+            return 1;
+        }
+        std::cout << "Opening cam0 + cam1 with model " << options->modelPath << std::endl;
+    }
+
     if (options->dual) {
         std::cout << "Dual inference: cam0 + cam1 (Ctrl+C to stop)" << std::endl;
         std::cout << "Capture: 640x360@15, YOLO "
@@ -490,7 +604,7 @@ int main(int argc, char* argv[])
                   << " hit-rate " << options->detectHitRate
                   << ", warmup " << options->warmupFrames << std::endl;
         std::cout << "Loaded model: " << options->modelPath << std::endl;
-        return runDualSearch(*options);
+        return runDualSearch(*options, options->espHandshake ? &handshakeState : nullptr);
     }
 
     std::unique_ptr<FrameSource> source;
@@ -550,7 +664,8 @@ int main(int argc, char* argv[])
                              nullptr,
 #endif
                              camTag, nullptr,
-                             options->useCamera && detector != nullptr);
+                             options->useCamera && detector != nullptr,
+                             nullptr, options->cameraDevice);
     }
 
     return runSingleFrame(*options, *source, detector.get(), headless, showWindow);
