@@ -1,4 +1,5 @@
 #include <atomic>
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <chrono>
@@ -53,12 +54,16 @@ struct Options {
     std::string modelPath;
 };
 
-// First camera to yield wins the DETECT pulse; then both cameras stop.
+// Shared across cam0/cam1: pulse on each yield; stop after requiredDetects handshakes.
+// Separation of two finds on the *same* camera is enforced per-worker by requiring
+// a streak of empty frames after each local yield (cameras face opposite ways, so
+// the other camera stays armed).
 struct DetectHandshakeState {
-    EspHandshake* handshake = nullptr;
+    EspHandshake* handshake = nullptr; // null = count detects only (no GPIO)
     int pulseMs = EspHandshake::kDefaultPulseMs;
+    int requiredDetects = 2;
     std::mutex mutex;
-    bool pulsed = false;
+    int detectCount = 0;
 };
 
 std::mutex gLogMutex;
@@ -318,11 +323,16 @@ int runSearchLoop(const Options& options, FrameSource& source,
 {
     const std::string windowName = logPrefix.empty() ? "mars-cv" : ("mars-cv-" + logPrefix);
     const int hitsNeeded = requiredHits(options.detectWindow, options.detectHitRate);
+    // After this camera handshakes, require this many consecutive empty frames
+    // before it may count another teletubby (avoids re-firing on the same target).
+    const int clearFramesNeeded = options.detectWindow;
     std::deque<bool> recent;
     int hitsInWindow = 0;
     int framesSeen = 0;
     bool warmupLogged = false;
     int framesSinceFpsLog = 0;
+    bool awaitingClear = false;
+    int clearStreak = 0;
     auto fpsWindowStart = std::chrono::steady_clock::now();
 
     if (options.warmupFrames > 0) {
@@ -360,59 +370,116 @@ int runSearchLoop(const Options& options, FrameSource& source,
             }
 
             const bool frameHasDetection = !detections.empty();
-            recent.push_back(frameHasDetection);
-            if (frameHasDetection) {
-                ++hitsInWindow;
-            }
-            if (static_cast<int>(recent.size()) > options.detectWindow) {
-                if (recent.front()) {
-                    --hitsInWindow;
-                }
-                recent.pop_front();
-            }
 
-            // Sliding-window yield: hit-rate in last N frames, gaps allowed.
-            if (stopOnDetect && detector != nullptr && hitsInWindow >= hitsNeeded) {
-                const float conf = bestConfidence(detections);
-                if (handshakeState != nullptr && handshakeState->handshake != nullptr) {
-                    std::lock_guard<std::mutex> lock(handshakeState->mutex);
-                    if (!handshakeState->pulsed) {
-                        const unsigned gpio = (cameraIndex == 0)
-                                                  ? EspHandshake::kDetectCam0Gpio
-                                                  : EspHandshake::kDetectCam1Gpio;
-                        if (!handshakeState->handshake->pulseDetect(cameraIndex,
-                                                                    handshakeState->pulseMs)) {
-                            logLine(logPrefix, handshakeState->handshake->lastError());
-                            if (stopFlag != nullptr) {
-                                stopFlag->store(true);
-                            }
-                            gStopRequested.store(true);
-                            Camera::interruptAll();
-                            return 1;
-                        }
-                        handshakeState->pulsed = true;
+            if (awaitingClear) {
+                // Same-camera re-arm only after the current target has left the frame.
+                if (!frameHasDetection) {
+                    ++clearStreak;
+                    if (clearStreak >= clearFramesNeeded) {
+                        awaitingClear = false;
+                        clearStreak = 0;
+                        recent.clear();
+                        hitsInWindow = 0;
                         logLine(logPrefix,
-                                "TELETUBBY DETECTED (confidence " +
-                                    std::to_string(conf).substr(0, 4) + ", GPIO" +
-                                    std::to_string(gpio) + " pulsed " +
-                                    std::to_string(handshakeState->pulseMs) + " ms)");
+                                "frame clear — rearmed for next teletubby (" +
+                                    std::to_string(clearFramesNeeded) +
+                                    " empty frames)");
+                    }
+                } else {
+                    clearStreak = 0;
+                }
+            } else {
+                recent.push_back(frameHasDetection);
+                if (frameHasDetection) {
+                    ++hitsInWindow;
+                }
+                if (static_cast<int>(recent.size()) > options.detectWindow) {
+                    if (recent.front()) {
+                        --hitsInWindow;
+                    }
+                    recent.pop_front();
+                }
+
+                // Sliding-window yield: pulse per camera; stop after N handshakes.
+                if (stopOnDetect && detector != nullptr && hitsInWindow >= hitsNeeded) {
+                    const float conf = bestConfidence(detections);
+                    bool shouldStop = true;
+                    int detectOrdinal = 1;
+                    int required = 1;
+
+                    if (handshakeState != nullptr) {
+                        std::lock_guard<std::mutex> lock(handshakeState->mutex);
+                        required = handshakeState->requiredDetects;
+                        if (handshakeState->detectCount >= required) {
+                            shouldStop = true;
+                        } else {
+                            if (handshakeState->handshake != nullptr) {
+                                const unsigned gpio = (cameraIndex == 0)
+                                                          ? EspHandshake::kDetectCam0Gpio
+                                                          : EspHandshake::kDetectCam1Gpio;
+                                if (!handshakeState->handshake->pulseDetect(
+                                        cameraIndex, handshakeState->pulseMs)) {
+                                    logLine(logPrefix,
+                                            handshakeState->handshake->lastError());
+                                    if (stopFlag != nullptr) {
+                                        stopFlag->store(true);
+                                    }
+                                    gStopRequested.store(true);
+                                    Camera::interruptAll();
+                                    return 1;
+                                }
+                                logLine(logPrefix,
+                                        "TELETUBBY DETECTED #" +
+                                            std::to_string(handshakeState->detectCount + 1) +
+                                            "/" + std::to_string(required) +
+                                            " (confidence " +
+                                            std::to_string(conf).substr(0, 4) + ", GPIO" +
+                                            std::to_string(gpio) + " pulsed " +
+                                            std::to_string(handshakeState->pulseMs) + " ms)");
+                            } else {
+                                logLine(logPrefix,
+                                        "TELETUBBY DETECTED #" +
+                                            std::to_string(handshakeState->detectCount + 1) +
+                                            "/" + std::to_string(required) +
+                                            " (confidence " +
+                                            std::to_string(conf).substr(0, 4) + ")");
+                            }
+                            ++handshakeState->detectCount;
+                            detectOrdinal = handshakeState->detectCount;
+                            shouldStop = handshakeState->detectCount >= required;
+                        }
                     } else {
                         logLine(logPrefix,
                                 "TELETUBBY DETECTED (confidence " +
-                                    std::to_string(conf).substr(0, 4) +
-                                    ", peer already pulsed)");
+                                    std::to_string(conf).substr(0, 4) + ")");
                     }
-                } else {
-                    logLine(logPrefix,
-                            "TELETUBBY DETECTED (confidence " +
-                                std::to_string(conf).substr(0, 4) + ")");
+
+                    recent.clear();
+                    hitsInWindow = 0;
+                    // This camera must lose the target before counting another.
+                    // The other camera stays armed (opposite field of view).
+                    awaitingClear = !shouldStop;
+                    clearStreak = 0;
+                    if (awaitingClear) {
+                        logLine(logPrefix,
+                                "awaiting frame clear before next detect on this camera");
+                    }
+
+                    if (shouldStop) {
+                        if (handshakeState != nullptr && detectOrdinal >= required) {
+                            logLine(logPrefix,
+                                    "Required detects reached (" +
+                                        std::to_string(required) +
+                                        ") — shutting down");
+                        }
+                        if (stopFlag != nullptr) {
+                            stopFlag->store(true);
+                        }
+                        gStopRequested.store(true);
+                        Camera::interruptAll();
+                        break;
+                    }
                 }
-                if (stopFlag != nullptr) {
-                    stopFlag->store(true);
-                }
-                gStopRequested.store(true);
-                Camera::interruptAll();
-                break;
             }
         }
 
@@ -562,6 +629,9 @@ int main(int argc, char* argv[])
 
     std::unique_ptr<EspHandshake> handshake;
     DetectHandshakeState handshakeState;
+    handshakeState.requiredDetects = 2;
+    handshakeState.pulseMs = options->detectPulseMs;
+
     if (options->espHandshake) {
         if (options->modelPath.empty()) {
             std::cerr << "ESP handshake requires --model" << std::endl;
@@ -577,11 +647,11 @@ int main(int argc, char* argv[])
             return 1;
         }
         handshakeState.handshake = handshake.get();
-        handshakeState.pulseMs = options->detectPulseMs;
         std::cout << "ESP handshake idle: waiting for START on GPIO"
                   << EspHandshake::kStartGpio
                   << " (cam0 DETECT GPIO" << EspHandshake::kDetectCam0Gpio
-                  << ", cam1 DETECT GPIO" << EspHandshake::kDetectCam1Gpio << ")"
+                  << ", cam1 DETECT GPIO" << EspHandshake::kDetectCam1Gpio
+                  << "; stop after " << handshakeState.requiredDetects << " detects)"
                   << std::endl;
         if (!handshake->waitForStart(&gStopRequested)) {
             std::cerr << handshake->lastError() << std::endl;
@@ -602,9 +672,10 @@ int main(int argc, char* argv[])
                   << ", conf " << options->confidence
                   << ", window " << options->detectWindow
                   << " hit-rate " << options->detectHitRate
-                  << ", warmup " << options->warmupFrames << std::endl;
+                  << ", warmup " << options->warmupFrames
+                  << ", need " << handshakeState.requiredDetects << " detects" << std::endl;
         std::cout << "Loaded model: " << options->modelPath << std::endl;
-        return runDualSearch(*options, options->espHandshake ? &handshakeState : nullptr);
+        return runDualSearch(*options, &handshakeState);
     }
 
     std::unique_ptr<FrameSource> source;
